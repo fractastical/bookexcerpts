@@ -3,126 +3,74 @@ import json
 from docx import Document
 from collections import defaultdict
 
-def extract_indented_quotes(doc, headings):
+def extract_citations(doc):
     # Pattern for matching "author (date) title" format
     pattern = r'^\s*(.*?)\s*\((\d{4})\)\s*(.*?)\.?\s*$'
-    quotes = []
-    paragraphs = iter(doc.paragraphs)
-    current_quote = []  # List to accumulate multi-paragraph quotes
+    citations = []
+    chapter_citation_count = defaultdict(int)
+    current_chapter_number = 1  # Start with Chapter 1
+    headings = {
+        "chapter": f"Chapter {current_chapter_number}: Start",  # Initialize as Chapter 1
+        "heading2": "",
+        "heading3": "",
+        "heading4": ""
+    }
     
-    for para in paragraphs:
-        # Check if the current paragraph is likely part of a quote (indented or not a heading)
-        if para.paragraph_format.left_indent or not para.style.name.startswith('Heading'):
-            current_quote.append(para.text.strip())
-            
-            # Look ahead to see if the next paragraph is an attribution
-            next_para = None
-            try:
-                next_para = next(paragraphs)
-            except StopIteration:
-                pass  # End of document reached
-            
-            if next_para and re.match(pattern, next_para.text.strip()):
-                # Combine all collected paragraphs into one quote
-                full_quote = " ".join(current_quote)
-                match = re.match(pattern, next_para.text.strip())
-                author = match.group(1)
-                date = match.group(2)
-                title = match.group(3)
-                quote_info = {
-                    "chapter": headings.get('Heading 2', 'Unknown Chapter'),
-                    "heading2": headings.get('Heading 2', ''),
-                    "heading3": headings.get('Heading 3', ''),
-                    "heading4": headings.get('Heading 4', ''),
-                    "author": author,
-                    "date": date,
-                    "title": title,
-                    "quote": full_quote
-                }
-                quotes.append(quote_info)
-                print(f"Extracted multi-paragraph quote: {quote_info}")  # Debugging print
-                current_quote = []  # Reset after processing
-            elif next_para:
-                # If the next paragraph isn't an attribution, put it back into the iteration
-                current_quote.append(next_para.text.strip())
-            else:
-                # If there's no next paragraph, treat it as an orphaned attribution
-                if current_quote:
-                    quote_info = {
-                        "chapter": headings.get('Heading 2', 'Unknown Chapter'),
-                        "heading2": headings.get('Heading 2', ''),
-                        "heading3": headings.get('Heading 3', ''),
-                        "heading4": headings.get('Heading 4', ''),
-                        "quote": " ".join(current_quote),
-                        "author": "",
-                        "date": "",
-                        "title": "Orphaned quote without attribution"
-                    }
-                    quotes.append(quote_info)
-                    print(f"Orphaned quote: {quote_info}")  # Debugging print
-                current_quote = []  # Reset after processing
-        else:
-            # If it's a heading or other paragraph, check for an attribution on its own
-            if current_quote:
-                quote_info = {
-                    "chapter": headings.get('Heading 2', 'Unknown Chapter'),
-                    "heading2": headings.get('Heading 2', ''),
-                    "heading3": headings.get('Heading 3', ''),
-                    "heading4": headings.get('Heading 4', ''),
-                    "quote": " ".join(current_quote),
-                    "author": "",
-                    "date": "",
-                    "title": "Orphaned quote without attribution"
-                }
-                quotes.append(quote_info)
-                print(f"Orphaned quote: {quote_info}")  # Debugging print
-                current_quote = []  # Reset after processing
-            
-            # Check if this paragraph is an orphaned attribution
-            match = re.match(pattern, para.text.strip())
-            if match:
-                author = match.group(1)
-                date = match.group(2)
-                title = match.group(3)
-                quote_info = {
-                    "chapter": headings.get('Heading 2', 'Unknown Chapter'),
-                    "heading2": headings.get('Heading 2', ''),
-                    "heading3": headings.get('Heading 3', ''),
-                    "heading4": headings.get('Heading 4', ''),
-                    "quote": "Orphaned attribution without preceding quote",
-                    "author": author,
-                    "date": date,
-                    "title": title
-                }
-                quotes.append(quote_info)
-                print(f"Extracted orphaned attribution: {quote_info}")  # Debugging print
-
-    return quotes
-
-def process_document(doc):
-    all_quotes = []
-    chapter_quotes_count = defaultdict(int)
-    
-    headings = {}
-
     for para in doc.paragraphs:
-        # Track Heading 2, Heading 3, Heading 4, etc.
+        # Track Heading 2 as chapters (but do not change the chapter number here)
         if para.style.name == 'Heading 2':
             match = re.match(r'(\d+)\.\s*(.*)', para.text.strip())
             if match:
-                headings['Heading 2'] = f"{match.group(1)}: {match.group(2)}"
-                print(f"Processing {headings['Heading 2']}")  # Debugging print
-        elif para.style.name == 'Heading 3':
-            headings['Heading 3'] = para.text.strip()
-        elif para.style.name == 'Heading 4':
-            headings['Heading 4'] = para.text.strip()
+                headings['heading2'] = f"{match.group(1)}: {match.group(2)}"
+                print(f"Processing {headings['heading2']}")  # Debugging print
         
-        # Extract quotes within the current headings context
-        quotes = extract_indented_quotes(doc, headings)
-        all_quotes.extend(quotes)
-        chapter_quotes_count[headings.get('Heading 2', 'Unknown Chapter')] += len(quotes)
+        # Track Heading 3 for sub-sections and detect "Bibliography"
+        elif para.style.name == 'Heading 3':
+            if para.text.strip().lower() == 'bibliography':
+                print(f"Detected Bibliography, ending {headings['chapter']}")
+                current_chapter_number += 1
+                headings['chapter'] = f"Chapter {current_chapter_number}: Next Chapter"
+                headings['heading2'] = headings['chapter']  # Update heading2 for the new chapter
+                headings['heading3'] = ""
+                headings['heading4'] = ""
+                print(f"Starting {headings['chapter']}")  # Debugging print
+            else:
+                headings['heading3'] = para.text.strip()
+        
+        # Track Heading 4 if present
+        elif para.style.name == 'Heading 4':
+            headings['heading4'] = para.text.strip()
+        
+        # Check if the paragraph matches the citation pattern
+        match = re.match(pattern, para.text.strip())
+        if match:
+            author = match.group(1)
+            date = match.group(2)
+            title = match.group(3)
+            citation_info = {
+                "chapter": headings['chapter'],
+                "heading2": headings['heading2'],
+                "heading3": headings['heading3'],
+                "heading4": headings['heading4'],
+                "author": author,
+                "date": date,
+                "title": title
+            }
+            citations.append(citation_info)
+            chapter_citation_count[headings['chapter']] += 1
+            print(f"Extracted citation: {citation_info}")  # Debugging print
     
-    return all_quotes, chapter_quotes_count
+    return citations, chapter_citation_count
+
+def process_document(doc):
+    all_citations = []
+    chapter_citation_count = defaultdict(int)
+
+    # Extract all citations in the document
+    citations, chapter_citation_count = extract_citations(doc)
+    all_citations.extend(citations)
+    
+    return all_citations, chapter_citation_count
 
 # Load the .docx file
 doc_path = 'cyberutopias-r.docx'
@@ -135,19 +83,22 @@ else:
     print("Document loaded successfully.")
 
 # Process the document
-quotes_json, chapter_quotes_count = process_document(doc)
+citations_json, chapter_citation_count = process_document(doc)
 
-# Check if any quotes were extracted
-if not quotes_json:
-    print("No quotes were extracted.")
+# Check if any citations were extracted
+if not citations_json:
+    print("No citations were extracted.")
 else:
-    # Save the extracted quotes as JSON
-    output_json_path = 'extracted_quotes.json'
+    # Save the extracted citations as JSON
+    output_json_path = 'extracted_citations_with_headings.json'
     with open(output_json_path, 'w') as outfile:
-        json.dump(quotes_json, outfile, indent=2)
+        json.dump(citations_json, outfile, indent=2)
 
-    # Print the number of excerpts per chapter and the total number
-    total_excerpts = sum(chapter_quotes_count.values())
-    print(f"Total number of excerpts: {total_excerpts}")
-    for chapter, count in chapter_quotes_count.items():
-        print(f"{chapter}: {count} excerpts")
+    # Print the total number of citations extracted
+    total_citations = len(citations_json)
+    print(f"Total number of citations: {total_citations}")
+    
+    # Print the number of citations per chapter
+    print("\nNumber of citations per chapter:")
+    for chapter, count in chapter_citation_count.items():
+        print(f"{chapter}: {count} citations")
