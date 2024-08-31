@@ -2,6 +2,37 @@ import re
 import json
 from docx import Document
 from collections import defaultdict
+from docx.shared import Pt
+from docx.enum.style import WD_STYLE_TYPE
+
+def format_citation_mit(citation):
+    author = citation['author']
+    date = citation['date']
+    title = citation['title']
+    
+    # Format author names
+    authors = author.split(' and ')
+    if len(authors) > 1:
+        formatted_authors = ', '.join(authors[:-1]) + ' and ' + authors[-1]
+    else:
+        formatted_authors = authors[0]
+    
+    # Ensure correct capitalization
+    def capitalize_title(title):
+        words = title.split()
+        result = []
+        for i, word in enumerate(words):
+            if i == 0 or word[0] in ['"', "'"]:  # Capitalize first word or words after quotes
+                result.append(word.capitalize())
+            elif len(word) > 3 and word.lower() not in ['a', 'an', 'the', 'and', 'but', 'or', 'for', 'nor', 'on', 'at', 'to', 'from', 'by', 'in', 'of']:
+                result.append(word.capitalize())
+            else:
+                result.append(word.lower())
+        return ' '.join(result)
+
+    capitalized_title = capitalize_title(title)
+
+    return f"{formatted_authors}. {date}. {capitalized_title}."
 
 def extract_citations(doc):
     main_text_pattern = r'^\s*(.*?)\s*\((\d{4}(?:-\d{4})?)\)\.?\s*(.*?)(?:,\s*p\.\s*(\d+))?\.?\s*$'
@@ -14,7 +45,7 @@ def extract_citations(doc):
     bibliography_pattern = r'(.*?)\s*\((\d{4}(?:-\d{4})?)\)\.?\s*(.*?)\.\s*'
     
     citations = defaultdict(lambda: {'main_text': [], 'footnotes': [], 'extracts': [], 'references': []})
-    current_chapter_number = 0
+    chapter_counter = 0  # Start with Chapter 1
     headings = {
         "chapter": "",
         "heading2": "",
@@ -67,29 +98,25 @@ def extract_citations(doc):
             footnote_text = ''.join(paragraph.text for paragraph in footnote.findall('.//w:t', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}))
             citation_info = process_footnote(footnote_text)
             citations[headings['chapter']]['footnotes'].append(citation_info)
-            print(f"Extracted footnote: {citation_info}")
 
     for para in doc.paragraphs:
         if para.style.name == 'Heading 2':
             match = re.match(r'(\d+)\.\s*(.*)', para.text.strip())
             if match:
-                current_chapter_number = int(match.group(1))
+                chapter_counter += 1
                 chapter_title = match.group(2)
             else:
-                current_chapter_number += 1
                 chapter_title = para.text.strip()
             
-            headings['chapter'] = f"Chapter {current_chapter_number}: {chapter_title}"
+            headings['chapter'] = f"Chapter {chapter_counter}: {chapter_title}"
             headings['heading2'] = headings['chapter']
             headings['heading3'] = ""
             headings['heading4'] = ""
             in_bibliography = False
-            print(f"Processing {headings['chapter']}")
 
         elif para.style.name in ['Heading 3', 'Heading 4']:
             lower_text = para.text.strip().lower()
             if lower_text in bibliography_headings:
-                print(f"Detected {para.text.strip()} in {headings['chapter']}")
                 in_bibliography = True
                 bibliography_section = para.text.strip().lower()
             else:
@@ -128,74 +155,66 @@ def extract_citations(doc):
                 }
 
                 citations[headings['chapter']]['main_text'].append(citation_info)
-                print(f"Extracted main text citation: {citation_info}")
 
     return citations
 
-# The rest of the script (process_document function and main execution) remains the same
+def generate_chapter_based_citations(citations):
+    new_doc = Document()
 
-def process_document(doc):
-    citations = extract_citations(doc)
-    output_json = {}
+    # Add a title to the document
+    title = new_doc.add_paragraph("Combined Citations by Chapter")
+    title_style = new_doc.styles.add_style('CustomTitle', WD_STYLE_TYPE.PARAGRAPH)
+    title.style = title_style
+    title.style.font.size = Pt(18)
+    title.style.font.bold = True
+
+    # Create a single citation style
+    citation_style = new_doc.styles.add_style('CitationStyle', WD_STYLE_TYPE.PARAGRAPH)
+    citation_style.font.size = Pt(12)
+    citation_style.font.name = 'Times New Roman'
+    citation_style.paragraph_format.left_indent = Pt(36)
+    citation_style.paragraph_format.first_line_indent = Pt(-36)
+    citation_style.paragraph_format.space_after = Pt(12)
 
     for chapter, chapter_data in citations.items():
-        chapter_json = {
-            "citations": [],
-            "footnotes": [],
-            "extracts": chapter_data['extracts'],
-            "references": chapter_data['references']
-        }
+        # Add chapter heading
+        chapter_heading = new_doc.add_paragraph(chapter)
+        if f'ChapterHeading_{chapter}' not in new_doc.styles:
+            heading_style = new_doc.styles.add_style(f'ChapterHeading_{chapter}', WD_STYLE_TYPE.PARAGRAPH)
+            heading_style.font.size = Pt(16)
+            heading_style.font.bold = True
+            heading_style.font.name = 'Times New Roman'
+            heading_style.paragraph_format.space_before = Pt(24)
+            heading_style.paragraph_format.space_after = Pt(12)
+        chapter_heading.style = new_doc.styles[f'ChapterHeading_{chapter}']
 
-        missing_extracts = []
-        missing_references = []
-
-        # Process main text citations
+        chapter_citations = []
+        
+        # Add citations from extracts
+        chapter_citations.extend(chapter_data['extracts'])
+        
+        # Add citations from main text
         for citation in chapter_data['main_text']:
-            if citation not in chapter_data['extracts']:
-                citation['not_in_extracts'] = True
-                missing_extracts.append(citation)
-            chapter_json['citations'].append(citation)
-
-        # Process footnotes
+            if citation not in chapter_citations:
+                chapter_citations.append(citation)
+        
+        # Add citations from footnotes
         for footnote in chapter_data['footnotes']:
-            if footnote.get('standard_format', False):
-                if footnote not in chapter_data['references']:
-                    footnote['not_in_references'] = True
-                    missing_references.append(footnote)
-            chapter_json['footnotes'].append(footnote)
+            if footnote.get('standard_format', False) and footnote not in chapter_citations:
+                chapter_citations.append(footnote)
 
-        # Generate summary
-        summary = {
-            "citations_in_text": len(chapter_data['main_text']),
-            "citations_in_footnotes": len(chapter_data['footnotes']),
-            "listings_in_extracts": len(chapter_data['extracts']),
-            "missing_listings_in_extracts": len(missing_extracts),
-            "listings_in_references": len(chapter_data['references']),
-            "missing_listings_in_references": len(missing_references)
-        }
+        # Sort citations alphabetically by author
+        sorted_citations = sorted(chapter_citations, key=lambda x: x['author'].split()[-1])
 
-        chapter_json['summary'] = summary
-        output_json[chapter] = chapter_json
+        # Add each citation in MIT format
+        for citation in sorted_citations:
+            citation_text = format_citation_mit(citation)
+            paragraph = new_doc.add_paragraph(citation_text)
+            paragraph.style = citation_style
 
-    # Save all chapters to a single JSON file
-    with open('all_chapters_citations.json', 'w') as outfile:
-        json.dump(output_json, outfile, indent=2)
-
-    print("Saved all_chapters_citations.json")
-
-    # Print summary for each chapter to console
-    print("\nSummary for each chapter:")
-    for chapter, chapter_data in output_json.items():
-        print(f"\n{chapter}")
-        summary = chapter_data['summary']
-        print(f"  Citations in text: {summary['citations_in_text']}")
-        print(f"  Citations in footnotes: {summary['citations_in_footnotes']}")
-        print(f"  Listings in extracts: {summary['listings_in_extracts']}")
-        print(f"  Missing listings in extracts: {summary['missing_listings_in_extracts']}")
-        print(f"  Listings in references: {summary['listings_in_references']}")
-        print(f"  Missing listings in references: {summary['missing_listings_in_references']}")
-
-    return citations
+    # Save the new document
+    new_doc.save('combined_citations_by_chapter.docx')
+    print("Saved combined_citations_by_chapter.docx")
 
 # Load the .docx file
 doc_path = 'cyberutopias-r.docx'
@@ -206,4 +225,7 @@ if not doc:
 else:
     print("Document loaded successfully.")
 
-process_document(doc)
+citations = extract_citations(doc)
+
+# Generate the chapter-based citation document
+generate_chapter_based_citations(citations)
