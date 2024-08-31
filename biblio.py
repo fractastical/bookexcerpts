@@ -4,101 +4,206 @@ from docx import Document
 from collections import defaultdict
 
 def extract_citations(doc):
-    # Pattern for matching "author (date) title" format
-    pattern = r'^\s*(.*?)\s*\((\d{4})\)\s*(.*?)\.?\s*$'
-    citations = []
-    chapter_citation_count = defaultdict(int)
-    current_chapter_number = 1  # Start with Chapter 1
+    main_text_pattern = r'^\s*(.*?)\s*\((\d{4}(?:-\d{4})?)\)\.?\s*(.*?)(?:,\s*p\.\s*(\d+))?\.?\s*$'
+    footnote_patterns = [
+        r'(\w+),\s+(.*?)\s*\((\d{4}(?:-\d{4})?)\)\.\s*(.*?)\.',  # Author, Title (Year). Publisher.
+        r'(\w+)\s+(\w+)\s+(?:&|and)\s+(\w+)\s+(\w+)\s*\((\d{4}(?:-\d{4})?)\)\.\s*(.*?)\.',  # Author1 Lastname1 & Author2 Lastname2 (Year). Title.
+        r'(\w+),\s+(.*?)\s*(\d{4}(?:-\d{4})?)\.',  # Author, Title Year.
+        r'(\w+),\s+(\w+)\s*\((\d{4}(?:-\d{4})?)\)\s*(.*?)\.',  # Lastname, Firstname (Year) Title.
+    ]
+    bibliography_pattern = r'(.*?)\s*\((\d{4}(?:-\d{4})?)\)\.?\s*(.*?)\.\s*'
+    
+    citations = defaultdict(lambda: {'main_text': [], 'footnotes': [], 'extracts': [], 'references': []})
+    current_chapter_number = 0
     headings = {
-        "chapter": f"Chapter {current_chapter_number}: Start",  # Initialize as Chapter 1
+        "chapter": "",
         "heading2": "",
         "heading3": "",
         "heading4": ""
     }
-    
+
+    in_bibliography = False
+    bibliography_section = ""
+    bibliography_headings = {"extracts", "references", "additional readings"}
+
+    def process_footnote(footnote_text):
+        standard_format = False
+        for pattern in footnote_patterns:
+            match = re.search(pattern, footnote_text)
+            if match:
+                groups = match.groups()
+                if len(groups) == 4:  # First pattern
+                    author, title, date, publisher = groups
+                elif len(groups) == 6:  # Second pattern
+                    author = f"{groups[0]} {groups[1]} and {groups[2]} {groups[3]}"
+                    date, title = groups[4], groups[5]
+                elif len(groups) == 3:  # Third pattern
+                    author, title, date = groups
+                elif len(groups) == 4:  # Fourth pattern
+                    author = f"{groups[1]} {groups[0]}"
+                    date, title = groups[2], groups[3]
+                
+                citation_info = {
+                    "author": author,
+                    "date": date,
+                    "title": title,
+                    "standard_format": True
+                }
+                standard_format = True
+                break
+        
+        if not standard_format:
+            citation_info = {
+                "full_text": footnote_text,
+                "standard_format": False
+            }
+        
+        return citation_info
+
+    # Process footnotes
+    footnotes = doc.part._element.findall('.//w:footnote', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
+    for footnote in footnotes:
+        if footnote.attrib['{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id'] not in ['0', '-1']:  # Skip separator and continuation separator footnotes
+            footnote_text = ''.join(paragraph.text for paragraph in footnote.findall('.//w:t', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}))
+            citation_info = process_footnote(footnote_text)
+            citations[headings['chapter']]['footnotes'].append(citation_info)
+            print(f"Extracted footnote: {citation_info}")
+
     for para in doc.paragraphs:
-        # Track Heading 2 as chapters (but do not change the chapter number here)
         if para.style.name == 'Heading 2':
             match = re.match(r'(\d+)\.\s*(.*)', para.text.strip())
             if match:
-                headings['heading2'] = f"{match.group(1)}: {match.group(2)}"
-                print(f"Processing {headings['heading2']}")  # Debugging print
-        
-        # Track Heading 3 for sub-sections and detect "Bibliography"
-        elif para.style.name == 'Heading 3':
-            if para.text.strip().lower() == 'bibliography':
-                print(f"Detected Bibliography, ending {headings['chapter']}")
-                current_chapter_number += 1
-                headings['chapter'] = f"Chapter {current_chapter_number}: Next Chapter"
-                headings['heading2'] = headings['chapter']  # Update heading2 for the new chapter
-                headings['heading3'] = ""
-                headings['heading4'] = ""
-                print(f"Starting {headings['chapter']}")  # Debugging print
+                current_chapter_number = int(match.group(1))
+                chapter_title = match.group(2)
             else:
-                headings['heading3'] = para.text.strip()
-        
-        # Track Heading 4 if present
-        elif para.style.name == 'Heading 4':
-            headings['heading4'] = para.text.strip()
-        
-        # Check if the paragraph matches the citation pattern
-        match = re.match(pattern, para.text.strip())
-        if match:
-            author = match.group(1)
-            date = match.group(2)
-            title = match.group(3)
-            citation_info = {
-                "chapter": headings['chapter'],
-                "heading2": headings['heading2'],
-                "heading3": headings['heading3'],
-                "heading4": headings['heading4'],
-                "author": author,
-                "date": date,
-                "title": title
-            }
-            citations.append(citation_info)
-            chapter_citation_count[headings['chapter']] += 1
-            print(f"Extracted citation: {citation_info}")  # Debugging print
-    
-    return citations, chapter_citation_count
+                current_chapter_number += 1
+                chapter_title = para.text.strip()
+            
+            headings['chapter'] = f"Chapter {current_chapter_number}: {chapter_title}"
+            headings['heading2'] = headings['chapter']
+            headings['heading3'] = ""
+            headings['heading4'] = ""
+            in_bibliography = False
+            print(f"Processing {headings['chapter']}")
+
+        elif para.style.name in ['Heading 3', 'Heading 4']:
+            lower_text = para.text.strip().lower()
+            if lower_text in bibliography_headings:
+                print(f"Detected {para.text.strip()} in {headings['chapter']}")
+                in_bibliography = True
+                bibliography_section = para.text.strip().lower()
+            else:
+                headings[para.style.name.lower()] = para.text.strip()
+                if not in_bibliography:
+                    in_bibliography = False
+
+        if in_bibliography and para.text.strip() and para.style.name not in ['Heading 3', 'Heading 4']:
+            bib_match = re.search(bibliography_pattern, para.text.strip())
+            if bib_match:
+                author = bib_match.group(1).strip()
+                date = bib_match.group(2).strip()
+                title = bib_match.group(3).strip()
+                entry = {
+                    "author": author,
+                    "date": date,
+                    "title": title
+                }
+                if bibliography_section == 'extracts':
+                    citations[headings['chapter']]['extracts'].append(entry)
+                elif bibliography_section == 'references':
+                    citations[headings['chapter']]['references'].append(entry)
+        elif not in_bibliography:
+            match = re.match(main_text_pattern, para.text.strip())
+            if match:
+                author = match.group(1).strip()
+                date = match.group(2).strip()
+                title = match.group(3).strip()
+                page_number = match.group(4)
+
+                citation_info = {
+                    "author": author,
+                    "date": date,
+                    "title": title,
+                    "page_number": page_number if page_number else None
+                }
+
+                citations[headings['chapter']]['main_text'].append(citation_info)
+                print(f"Extracted main text citation: {citation_info}")
+
+    return citations
+
+# The rest of the script (process_document function and main execution) remains the same
 
 def process_document(doc):
-    all_citations = []
-    chapter_citation_count = defaultdict(int)
+    citations = extract_citations(doc)
+    output_json = {}
 
-    # Extract all citations in the document
-    citations, chapter_citation_count = extract_citations(doc)
-    all_citations.extend(citations)
-    
-    return all_citations, chapter_citation_count
+    for chapter, chapter_data in citations.items():
+        chapter_json = {
+            "citations": [],
+            "footnotes": [],
+            "extracts": chapter_data['extracts'],
+            "references": chapter_data['references']
+        }
+
+        missing_extracts = []
+        missing_references = []
+
+        # Process main text citations
+        for citation in chapter_data['main_text']:
+            if citation not in chapter_data['extracts']:
+                citation['not_in_extracts'] = True
+                missing_extracts.append(citation)
+            chapter_json['citations'].append(citation)
+
+        # Process footnotes
+        for footnote in chapter_data['footnotes']:
+            if footnote.get('standard_format', False):
+                if footnote not in chapter_data['references']:
+                    footnote['not_in_references'] = True
+                    missing_references.append(footnote)
+            chapter_json['footnotes'].append(footnote)
+
+        # Generate summary
+        summary = {
+            "citations_in_text": len(chapter_data['main_text']),
+            "citations_in_footnotes": len(chapter_data['footnotes']),
+            "listings_in_extracts": len(chapter_data['extracts']),
+            "missing_listings_in_extracts": len(missing_extracts),
+            "listings_in_references": len(chapter_data['references']),
+            "missing_listings_in_references": len(missing_references)
+        }
+
+        chapter_json['summary'] = summary
+        output_json[chapter] = chapter_json
+
+    # Save all chapters to a single JSON file
+    with open('all_chapters_citations.json', 'w') as outfile:
+        json.dump(output_json, outfile, indent=2)
+
+    print("Saved all_chapters_citations.json")
+
+    # Print summary for each chapter to console
+    print("\nSummary for each chapter:")
+    for chapter, chapter_data in output_json.items():
+        print(f"\n{chapter}")
+        summary = chapter_data['summary']
+        print(f"  Citations in text: {summary['citations_in_text']}")
+        print(f"  Citations in footnotes: {summary['citations_in_footnotes']}")
+        print(f"  Listings in extracts: {summary['listings_in_extracts']}")
+        print(f"  Missing listings in extracts: {summary['missing_listings_in_extracts']}")
+        print(f"  Listings in references: {summary['listings_in_references']}")
+        print(f"  Missing listings in references: {summary['missing_listings_in_references']}")
+
+    return citations
 
 # Load the .docx file
 doc_path = 'cyberutopias-r.docx'
 doc = Document(doc_path)
 
-# Verify document loaded
 if not doc:
     print("Failed to load the document.")
 else:
     print("Document loaded successfully.")
 
-# Process the document
-citations_json, chapter_citation_count = process_document(doc)
-
-# Check if any citations were extracted
-if not citations_json:
-    print("No citations were extracted.")
-else:
-    # Save the extracted citations as JSON
-    output_json_path = 'extracted_citations_with_headings.json'
-    with open(output_json_path, 'w') as outfile:
-        json.dump(citations_json, outfile, indent=2)
-
-    # Print the total number of citations extracted
-    total_citations = len(citations_json)
-    print(f"Total number of citations: {total_citations}")
-    
-    # Print the number of citations per chapter
-    print("\nNumber of citations per chapter:")
-    for chapter, count in chapter_citation_count.items():
-        print(f"{chapter}: {count} citations")
+process_document(doc)
